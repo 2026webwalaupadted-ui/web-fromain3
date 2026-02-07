@@ -130,6 +130,7 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  z-index: 9998;
 }
 
 .fullscreen-loader.hidden {
@@ -261,6 +262,7 @@ body {
   }
 }
 
+/* ================== HEADER ================== */
 .header {
   background: var(--primary-gradient);
   padding: 12px 20px;
@@ -325,6 +327,33 @@ body {
   text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
 }
 
+/* Refresh button */
+.refresh-btn {
+  background: rgba(255, 255, 255, 0.2);
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  color: white;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.3s ease;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-left: 10px;
+}
+
+.refresh-btn:hover {
+  background: rgba(255, 255, 255, 0.3);
+  transform: rotate(90deg);
+}
+
+.refresh-btn:active {
+  transform: rotate(180deg);
+}
+
+/* ================== NAVIGATION ================== */
 .nav {
   background: white;
   border-bottom: 2px solid var(--gray-200);
@@ -1264,9 +1293,15 @@ body {
     <div class="header-title">
       <span class="live-badge">LIVE SMS</span>
     </div>
-    <div class="message-count">
-      <i class="fas fa-envelope"></i>
-      Total: <span class="count-number" id="totalMessages">0</span>
+    <div style="display: flex; align-items: center; gap: 10px;">
+      <div class="message-count">
+        <i class="fas fa-envelope"></i>
+        Total: <span class="count-number" id="totalMessages">0</span>
+      </div>
+      <button class="refresh-btn" onclick="refreshMessages()" title="Refresh messages">
+        <i class="fas fa-sync-alt"></i>
+        Refresh
+      </button>
     </div>
   </div>
 </header>
@@ -1357,10 +1392,22 @@ const PAGE_SIZE = 15;
 let isLoading = false;
 let hasMoreMessages = true;
 
-// State restoration variables
-let scrollPosition = 0;
-let searchQuery = '';
-let filterValue = 'all';
+// Track navigation state
+let isNavigatingToDeviceDetails = false;
+let lastNavigationTime = 0;
+
+/* ===== UTILITY FUNCTIONS ===== */
+function debounce(func, wait) {
+  let timeout;
+  return function executedFunction(...args) {
+    const later = () => {
+      clearTimeout(timeout);
+      func(...args);
+    };
+    clearTimeout(timeout);
+    timeout = setTimeout(later, wait);
+  };
+}
 
 /* ===== NAVIGATION FUNCTIONS ===== */
 function setupNavigation() {
@@ -1401,6 +1448,9 @@ function setupNavigation() {
 }
 
 function navigateToPage(page) {
+  // Save state before navigation
+  saveCurrentState();
+  
   switch(page) {
     case 'messages':
       window.location.href = 'messages.html';
@@ -1525,16 +1575,41 @@ function hideLoader() {
 
 /* ===== STATE MANAGEMENT FUNCTIONS ===== */
 function saveCurrentState() {
+  // Don't save if we're navigating to device details
+  if (isNavigatingToDeviceDetails) {
+    console.log('🚀 Skipping state save - navigating to device details');
+    return;
+  }
+  
   const state = {
     searchQuery: document.getElementById("search").value,
     filterValue: document.getElementById("filter").value,
     scrollPosition: window.scrollY,
     saveTime: Date.now(),
-    currentPage: currentPage
+    currentPage: currentPage,
+    messagesCount: allMessages.length,
+    displayedMessagesCount: displayedMessages.length,
+    lastMessageId: allMessages.length > 0 ? allMessages[0]._id : null,
+    // ✅ Save ALL messages data (limited to prevent localStorage overflow)
+    allMessages: allMessages.slice(0, 500),
+    displayedMessages: displayedMessages.slice(0, 200),
+    processedIds: Array.from(processedIds).slice(0, 1000)
   };
   
-  localStorage.setItem('messagesPageState', JSON.stringify(state));
-  console.log('💾 Messages page state saved');
+  try {
+    localStorage.setItem('messagesPageState', JSON.stringify(state));
+    console.log('💾 Messages page state saved with', state.allMessages.length, 'messages');
+  } catch (e) {
+    console.error('Error saving state:', e);
+    // If localStorage is full, save only essential data
+    const essentialState = {
+      searchQuery: state.searchQuery,
+      filterValue: state.filterValue,
+      scrollPosition: state.scrollPosition,
+      currentPage: state.currentPage
+    };
+    localStorage.setItem('messagesPageState', JSON.stringify(essentialState));
+  }
 }
 
 function loadSavedState() {
@@ -1544,10 +1619,13 @@ function loadSavedState() {
   try {
     const state = JSON.parse(savedState);
     
-    // Check if state is recent (within 1 hour)
-    if (state.saveTime && (Date.now() - state.saveTime < 60 * 60 * 1000)) {
-      console.log('🔄 Found saved messages page state');
+    // Check if state is recent (within 30 minutes)
+    if (state.saveTime && (Date.now() - state.saveTime < 30 * 60 * 1000)) {
+      console.log('🔄 Found recent saved messages page state');
       return state;
+    } else {
+      console.log('🗑️ Saved state is too old, clearing');
+      clearState();
     }
   } catch (e) {
     console.error('Error parsing saved state:', e);
@@ -1559,28 +1637,43 @@ function loadSavedState() {
 function restoreSavedState(state) {
   if (!state) return false;
   
-  console.log('🔄 Restoring saved state:', state);
+  console.log('🔄 Restoring COMPLETE saved state');
   
-  // Restore search query
+  // Restore all messages data if available
+  if (state.allMessages && state.allMessages.length > 0) {
+    allMessages = state.allMessages;
+    console.log('📥 Restored', allMessages.length, 'messages from saved state');
+  }
+  
+  if (state.displayedMessages && state.displayedMessages.length > 0) {
+    displayedMessages = state.displayedMessages;
+    console.log('📥 Restored', displayedMessages.length, 'filtered messages');
+  }
+  
+  if (state.processedIds && state.processedIds.length > 0) {
+    processedIds = new Set(state.processedIds);
+    console.log('📥 Restored', processedIds.size, 'processed IDs');
+  }
+  
+  // Restore UI state
   if (state.searchQuery) {
-    searchQuery = state.searchQuery;
     document.getElementById("search").value = state.searchQuery;
   }
   
-  // Restore filter
   if (state.filterValue) {
-    filterValue = state.filterValue;
     document.getElementById("filter").value = state.filterValue;
   }
   
-  // Restore page
   if (state.currentPage) {
-    currentPage = state.currentPage;
+    currentPage = parseInt(state.currentPage) || 1;
   }
   
   // Restore scroll position
   if (state.scrollPosition) {
-    scrollPosition = parseInt(state.scrollPosition);
+    setTimeout(() => {
+      window.scrollTo(0, parseInt(state.scrollPosition));
+      console.log('📍 Scroll position restored:', state.scrollPosition);
+    }, 100);
   }
   
   return true;
@@ -1588,24 +1681,8 @@ function restoreSavedState(state) {
 
 function clearState() {
   localStorage.removeItem('messagesPageState');
+  localStorage.removeItem('cachedMessages');
   console.log('🗑️ Messages page state cleared');
-}
-
-/* ===== PAGE NAVIGATION LOGIC ===== */
-function isNavigatingToDeviceDetails() {
-  // Check if we're navigating to device details
-  const currentHref = window.location.href;
-  return currentHref.includes('device-details.html');
-}
-
-function isCompleteRefresh() {
-  // Check if this is a complete browser refresh (not back/forward)
-  const perfEntries = performance.getEntriesByType("navigation");
-  if (perfEntries.length > 0) {
-    const navEntry = perfEntries[0];
-    return navEntry.type === 'reload' || navEntry.type === 'navigate';
-  }
-  return true;
 }
 
 /* ===== Toast Notification ===== */
@@ -1640,7 +1717,7 @@ function copyMessageToClipboard(text) {
   }
 }
 
-// Socket.io Connection WITH TOKEN
+/* ===== SOCKET.IO CONNECTION ===== */
 function initSocket() {
   try {
     const socketOptions = {
@@ -1698,7 +1775,7 @@ function initSocket() {
   }
 }
 
-// Handle LIVE SMS
+/* ===== HANDLE LIVE SMS ===== */
 function handleNewSMS(data) {
   console.log('🔔 Handling new SMS from socket:', data);
   
@@ -1747,6 +1824,9 @@ function handleNewSMS(data) {
   // Add to beginning of all messages
   allMessages.unshift(newMsg);
   
+  // Save to localStorage for persistence
+  saveMessagesToStorage();
+  
   // Apply current filters and add to displayed messages
   if (filterMessage(newMsg)) {
     displayedMessages.unshift(newMsg);
@@ -1757,13 +1837,46 @@ function handleNewSMS(data) {
   }
   
   // Update total count
-  const totalMessagesEl = document.getElementById("totalMessages");
-  if (totalMessagesEl) {
-    totalMessagesEl.textContent = allMessages.length;
-  }
+  updateTotalCount();
   
   // Show notification
   showNewMessageAlert(newMsg);
+}
+
+/* ===== LOCALSTORAGE FUNCTIONS ===== */
+function saveMessagesToStorage() {
+  try {
+    // Save only recent messages to avoid localStorage limits (last 1000 messages)
+    const messagesToSave = allMessages.slice(0, 1000);
+    localStorage.setItem('cachedMessages', JSON.stringify(messagesToSave));
+    console.log('💾 Messages saved to localStorage');
+  } catch (e) {
+    console.error('Error saving messages to localStorage:', e);
+  }
+}
+
+function loadMessagesFromStorage() {
+  try {
+    const cachedMessages = localStorage.getItem('cachedMessages');
+    if (cachedMessages) {
+      const parsedMessages = JSON.parse(cachedMessages);
+      console.log('📂 Loaded messages from localStorage:', parsedMessages.length);
+      
+      // Add to allMessages
+      allMessages = parsedMessages;
+      
+      // Restore processedIds
+      parsedMessages.forEach(msg => {
+        if (msg._id) processedIds.add(msg._id);
+        if (msg.id) processedIds.add(msg.id);
+      });
+      
+      return true;
+    }
+  } catch (e) {
+    console.error('Error loading messages from localStorage:', e);
+  }
+  return false;
 }
 
 function showNewMessageAlert(message) {
@@ -1811,7 +1924,7 @@ function showNewMessageAlert(message) {
   }, 6000);
 }
 
-// Date Formatting
+/* ===== DATE FORMATTING ===== */
 function formatDate(timestamp) {
   if (!timestamp) return "-";
   const date = new Date(timestamp);
@@ -1846,7 +1959,7 @@ function formatTime(timestamp) {
   });
 }
 
-// Message Filtering
+/* ===== MESSAGE FILTERING ===== */
 function isBankingMessage(text) {
   if (!text) return false;
   const keys = ["credited", "debited", "rs", "inr", "bank", "account", "upi", "txn", "transaction", "balance", "avl", "available"];
@@ -1855,8 +1968,8 @@ function isBankingMessage(text) {
 }
 
 function filterMessage(msg) {
-  const search = searchQuery || document.getElementById("search").value.toLowerCase();
-  const filter = filterValue || document.getElementById("filter").value;
+  const search = document.getElementById("search").value.toLowerCase();
+  const filter = document.getElementById("filter").value;
   const text = (msg.body || "").toLowerCase();
   
   // Apply filter
@@ -1896,19 +2009,21 @@ function filterMessage(msg) {
   return true;
 }
 
-// ✅ **FIXED: Apply Filters - CORRECT VERSION**
 function applyFilters() {
-  searchQuery = document.getElementById("search").value.toLowerCase();
-  filterValue = document.getElementById("filter").value;
+  console.log(`🔍 Applying filters to ${allMessages.length} messages`);
   
-  console.log(`🔍 Applying filters - Search: "${searchQuery}", Filter: "${filterValue}"`);
-  console.log(`📊 Total messages before filter: ${allMessages.length}`);
+  const searchQuery = document.getElementById("search").value.toLowerCase();
+  const filterValue = document.getElementById("filter").value;
   
-  // Filter all messages
+  // Start timing
+  const startTime = performance.now();
+  
+  // Apply filters
   displayedMessages = allMessages.filter(msg => {
     const text = (msg.body || "").toLowerCase();
-    let filterPass = false;
     
+    // Apply category filter
+    let filterPass = true;
     switch(filterValue) {
       case "credited":         
         filterPass = text.includes("credited") || text.includes(" cr ") || text.includes("credited.");
@@ -1928,6 +2043,7 @@ function applyFilters() {
     
     if (!filterPass) return false;
     
+    // Apply search filter
     if (searchQuery) {
       const bodyText = msg.body || "";
       const senderText = msg.sender || "";
@@ -1943,18 +2059,20 @@ function applyFilters() {
     return true;
   });
   
-  console.log(`✅ Filtered messages: ${displayedMessages.length} out of ${allMessages.length}`);
-  
-  // ✅ **FIX: Reset currentPage when applying filters**
+  // Reset to page 1 when applying filters
   currentPage = 1;
-  renderCurrentPage();
-  updatePaginationInfo();
   
-  // Save state after filtering
-  setTimeout(saveCurrentState, 100);
+  // Render the page
+  renderCurrentPage();
+  
+  // Save state
+  saveCurrentState();
+  
+  const endTime = performance.now();
+  console.log(`✅ Filtered ${displayedMessages.length} messages in ${(endTime - startTime).toFixed(2)}ms`);
 }
 
-// ✅ **FIXED: Render Current Page - CORRECT VERSION**
+/* ===== RENDERING FUNCTIONS ===== */
 function renderCurrentPage() {
   const container = document.getElementById("messagesList");
   const paginationDiv = document.getElementById("paginationContainer");
@@ -1962,64 +2080,54 @@ function renderCurrentPage() {
   
   if (!container) return;
   
-  container.innerHTML = "";
-  
-  // Calculate how many messages to show
+  // Calculate messages to show
   const endIndex = Math.min(currentPage * PAGE_SIZE, displayedMessages.length);
   const messagesToShow = displayedMessages.slice(0, endIndex);
   
-  console.log(`🔄 Rendering page ${currentPage} - Showing ${messagesToShow.length} of ${displayedMessages.length} filtered messages`);
+  console.log(`🔄 Rendering ${messagesToShow.length} messages (Page ${currentPage})`);
   
   if (messagesToShow.length === 0) {
-    container.innerHTML = `
-      <div class="empty-state">
-        <div class="icon">📭</div>
-        <h3>No messages found</h3>
-        <p>Try adjusting your search or filter criteria</p>
-      </div>
-    `;
-    
-    if (paginationDiv) {
-      paginationDiv.style.display = 'none';
-    }
+    showEmptyState();
+    if (paginationDiv) paginationDiv.style.display = 'none';
     return;
   }
   
-  messagesToShow.forEach(message => addMessageCard(message));
+  // Clear container efficiently
+  container.innerHTML = '';
   
-  // Show pagination controls
+  // Create document fragment for batch rendering
+  const fragment = document.createDocumentFragment();
+  
+  // Add messages to fragment
+  messagesToShow.forEach(message => {
+    const card = createMessageCard(message);
+    if (card) {
+      fragment.appendChild(card);
+    }
+  });
+  
+  // Append fragment to container (single reflow)
+  container.appendChild(fragment);
+  
+  // Update pagination
   if (paginationDiv) {
     paginationDiv.style.display = 'flex';
   }
   
   if (loadMoreBtn) {
-    // ✅ **FIX: Correct logic for load more button**
     if (displayedMessages.length > endIndex) {
       loadMoreBtn.disabled = false;
       loadMoreBtn.innerHTML = '<i class="fas fa-arrow-down"></i> Load More Messages';
-      console.log(`✅ Load More button ENABLED - More messages available (${displayedMessages.length} > ${endIndex})`);
     } else {
       loadMoreBtn.disabled = true;
       loadMoreBtn.innerHTML = '<i class="fas fa-check-circle"></i> All Messages Loaded';
-      console.log(`✅ Load More button DISABLED - All messages loaded (${displayedMessages.length} = ${endIndex})`);
     }
   }
   
   updatePaginationInfo();
 }
 
-function addMessageCard(message) {
-  const container = document.getElementById("messagesList");
-  if (!container) return;
-  
-  const card = document.createElement("div");
-  card.className = "message-card";
-  card.setAttribute("data-message-id", message._id || message.id);
-  
-  if (message.isLive) {
-    card.classList.add("live");
-  }
-
+function createMessageCard(message) {
   const messageBody = message.body || "No message content available";
   const safeBody = messageBody.replace(/"/g, '\\"').replace(/'/g, "\\'");
   const isBanking = isBankingMessage(messageBody);
@@ -2031,6 +2139,14 @@ function addMessageCard(message) {
   // Calculate word and character counts
   const wordCount = messageBody.split(/\s+/).filter(word => word.length > 0).length;
   const charCount = messageBody.length;
+
+  const card = document.createElement('div');
+  card.className = 'message-card';
+  card.setAttribute('data-message-id', message._id || message.id);
+  
+  if (message.isLive) {
+    card.classList.add('live');
+  }
 
   card.innerHTML = `
     <div class="message-header">
@@ -2109,19 +2225,27 @@ function addMessageCard(message) {
     this.classList.toggle('expanded');
   });
 
-  // Device info row click - navigate to device details WITH STATE SAVING
+  // ✅ **FIXED: Device info row click - navigate to device details PROPERLY**
   const deviceInfoRow = card.querySelector('.device-info-row');
   if (deviceInfoRow) {
     deviceInfoRow.addEventListener('click', function(e) {
       e.stopPropagation();
+      e.preventDefault();
+      
       const deviceId = this.getAttribute('data-device-id');
       
       if (deviceId && deviceId !== "N/A") {
-        // Save current state BEFORE navigating (like devices page)
+        console.log(`🚀 Navigating to device details for device: ${deviceId}`);
+        
+        // Set flag that we're navigating to device details
+        isNavigatingToDeviceDetails = true;
+        lastNavigationTime = Date.now();
+        
+        // Save COMPLETE state before navigating
         saveCurrentState();
         
         // Navigate to device details
-        window.location.href = `device-details.html?id=${deviceId}`;
+        window.location.href = `device-details.html?deviceId=${encodeURIComponent(deviceId)}&fromMessages=true`;
       }
     });
   }
@@ -2131,6 +2255,7 @@ function addMessageCard(message) {
   if (copyBtn) {
     copyBtn.addEventListener("click", function(e) {
       e.stopPropagation();
+      e.preventDefault();
       const text = this.getAttribute("data-text") || messageBody;
       copyMessageToClipboard(text);
     });
@@ -2141,14 +2266,31 @@ function addMessageCard(message) {
   if (messageDisplay) {
     messageDisplay.addEventListener("click", function(e) {
       e.stopPropagation();
+      e.preventDefault();
       copyMessageToClipboard(messageBody);
     });
   }
   
-  container.appendChild(card);
+  return card;
 }
 
-// ✅ **FIXED: Load More Messages - CORRECT VERSION**
+function showEmptyState() {
+  const container = document.getElementById("messagesList");
+  if (!container) return;
+  
+  container.innerHTML = `
+    <div class="empty-state">
+      <div class="icon">📭</div>
+      <h3>No messages found</h3>
+      <p>Try adjusting your search or filter criteria</p>
+      <button class="retry-btn" onclick="clearFilters()">
+        <i class="fas fa-times"></i>
+        Clear Filters
+      </button>
+    </div>
+  `;
+}
+
 function loadMoreMessages() {
   if (isLoading) {
     console.log('⏭️ Cannot load more - Already loading');
@@ -2182,7 +2324,10 @@ function loadMoreMessages() {
       console.log(`📥 Loading messages ${startIndex + 1} to ${endIndex} of ${displayedMessages.length}`);
       
       messagesToShow.forEach(message => {
-        addMessageCard(message);
+        const card = createMessageCard(message);
+        if (card) {
+          container.appendChild(card);
+        }
       });
     }
     
@@ -2192,11 +2337,9 @@ function loadMoreMessages() {
       if (displayedMessages.length > nextEndIndex) {
         loadMoreBtn.disabled = false;
         loadMoreBtn.innerHTML = '<i class="fas fa-arrow-down"></i> Load More Messages';
-        console.log(`✅ Load More button re-enabled (${displayedMessages.length} > ${nextEndIndex})`);
       } else {
         loadMoreBtn.disabled = true;
         loadMoreBtn.innerHTML = '<i class="fas fa-check-circle"></i> All Messages Loaded';
-        console.log(`✅ All messages loaded, button disabled (${displayedMessages.length} <= ${nextEndIndex})`);
       }
     }
     
@@ -2216,13 +2359,19 @@ function updatePaginationInfo() {
       pageInfo.textContent = 'No messages found';
     } else {
       pageInfo.textContent = `Showing ${currentShowing} of ${totalDisplayed} messages`;
-      console.log(`📊 Pagination: Showing ${currentShowing} of ${totalDisplayed} messages`);
     }
   }
 }
 
-/* ===== ✅ FIXED: FETCH MESSAGES WITH TOKEN - CORRECT VERSION ===== */
-async function fetchAllMessages() {
+function updateTotalCount() {
+  const totalMessagesEl = document.getElementById("totalMessages");
+  if (totalMessagesEl) {
+    totalMessagesEl.textContent = allMessages.length;
+  }
+}
+
+/* ===== MESSAGE FETCHING FUNCTIONS ===== */
+async function fetchAllMessages(forceRefresh = false) {
   // Check authentication first
   if (!checkAuth()) {
     return;
@@ -2237,20 +2386,31 @@ async function fetchAllMessages() {
   const container = document.getElementById("messagesList");
   if (!container) return;
   
-  // Check for saved state first (only if not a complete refresh)
-  if (!isCompleteRefresh()) {
-    const savedState = loadSavedState();
-    if (savedState) {
-      restoreSavedState(savedState);
-    }
-  } else {
-    // Complete refresh - clear state and go to top
-    clearState();
-    searchQuery = '';
-    filterValue = 'all';
-    currentPage = 1;
+  // Check for saved state
+  const savedState = loadSavedState();
+  
+  // If we have saved state and it's not a force refresh, restore it
+  if (!forceRefresh && savedState && savedState.allMessages && savedState.allMessages.length > 0) {
+    console.log('🔄 Using saved state for fast load');
+    
+    // Restore saved state
+    restoreSavedState(savedState);
+    
+    // Apply filters with restored data
+    applyFilters();
+    
+    // Hide loader quickly for cached data
+    setTimeout(hideLoader, 300);
+    
+    // Update total count
+    updateTotalCount();
+    
+    // Fetch fresh data in background
+    fetchFreshDataSilently();
+    return;
   }
   
+  // Show loading
   container.innerHTML = `<div class="loading-more">Loading messages...</div>`;
   
   try {
@@ -2314,33 +2474,29 @@ async function fetchAllMessages() {
       });
       
       console.log(`✅ Total messages loaded: ${allMessages.length}`);
-      console.log(`✅ First message timestamp: ${allMessages[0] ? formatDate(allMessages[0].timestamp) : 'None'}`);
-      console.log(`✅ Last message timestamp: ${allMessages[allMessages.length - 1] ? formatDate(allMessages[allMessages.length - 1].timestamp) : 'None'}`);
       
-      // ✅ **FIX: Reset currentPage to 1 when loading fresh data**
+      // Save to localStorage
+      saveMessagesToStorage();
+      
+      // Reset to page 1 when loading fresh data
       currentPage = 1;
       
       // Update total count
-      const totalMessagesEl = document.getElementById("totalMessages");
-      if (totalMessagesEl) {
-        totalMessagesEl.textContent = allMessages.length;
-        console.log(`✅ Total count updated: ${allMessages.length}`);
-      }
+      updateTotalCount();
       
-      // ✅ **FIX: Apply filters which will render the page**
+      // Apply filters and render
       applyFilters();
       
     } else {
       console.log('⚠️ No data or success false:', data);
       allMessages = [];
       displayedMessages = [];
-      hasMoreMessages = false;
       renderCurrentPage();
     }
     
     updatePaginationInfo();
     
-    // ✅ **FIX: Force show pagination if there are more messages**
+    // Show pagination if needed
     const paginationDiv = document.getElementById("paginationContainer");
     const loadMoreBtn = document.getElementById('loadMoreBtn');
     
@@ -2352,16 +2508,10 @@ async function fetchAllMessages() {
         loadMoreBtn.disabled = false;
         loadMoreBtn.innerHTML = '<i class="fas fa-arrow-down"></i> Load More Messages';
       }
-      console.log(`✅ Pagination enabled - Filtered: ${displayedMessages.length}, Page Size: ${PAGE_SIZE}`);
     }
     
-    // Restore scroll position after rendering (if not complete refresh)
-    if (!isCompleteRefresh() && scrollPosition > 0) {
-      setTimeout(() => {
-        window.scrollTo(0, scrollPosition);
-        console.log('📍 Scroll position restored:', scrollPosition);
-      }, 300);
-    }
+    // Hide loader
+    setTimeout(hideLoader, 500);
     
   } catch(error) {
     console.error('Fetch Error:', error);
@@ -2369,6 +2519,14 @@ async function fetchAllMessages() {
     // Check if it's an auth error
     if (error.message.includes('401') || error.message.includes('403')) {
       showAuthError('Authentication failed. Please login again.');
+      return;
+    }
+    
+    // Try to use cached data if available
+    if (loadMessagesFromStorage()) {
+      console.log('🔄 Using cached data due to fetch error');
+      applyFilters();
+      hideLoader();
       return;
     }
     
@@ -2385,66 +2543,116 @@ async function fetchAllMessages() {
         </div>
       `;
     }
+    
+    hideLoader();
   }
-  
-  // Hide loader after data is loaded
-  setTimeout(hideLoader, 300);
 }
 
-/* ===== SCROLL AND VISIBILITY HANDLERS ===== */
-document.addEventListener('visibilitychange', function() {
-  if (document.visibilityState === 'visible') {
-    // User came back from another tab/window or device details
-    const savedState = loadSavedState();
-    if (savedState && savedState.scrollPosition) {
-      setTimeout(() => {
-        window.scrollTo(0, parseInt(savedState.scrollPosition));
-      }, 100);
+/* ===== SILENT BACKGROUND DATA FETCH ===== */
+async function fetchFreshDataSilently() {
+  try {
+    const response = await fetch(MESSAGES_API, {
+      headers: {
+        'Authorization': `Bearer ${authToken}`
+      },
+      cache: 'no-store'
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      if (data.success && data.data) {
+        // Process only NEW messages
+        const newMessages = data.data.filter(msg => 
+          !processedIds.has(msg._id) && !processedIds.has(msg.id)
+        );
+        
+        if (newMessages.length > 0) {
+          console.log(`🔄 ${newMessages.length} new messages fetched silently`);
+          
+          // Process new messages
+          newMessages.forEach(msg => {
+            if (msg._id) processedIds.add(msg._id);
+            if (msg.id) processedIds.add(msg.id);
+            
+            // Normalize message data
+            if (!msg.body) {
+              if (msg.body_preview) msg.body = msg.body_preview;
+              else if (msg.message) msg.body = msg.message;
+              else if (msg.content) msg.body = msg.content;
+              else if (msg.sms) msg.body = msg.sms;
+              else msg.body = "No message content";
+            }
+            
+            msg.sender = msg.sender || msg.senderNumber;
+            msg.receiverNumber = msg.receiverNumber || msg.receiver;
+            msg.uniqueid = msg.uniqueid || msg.deviceId;
+            msg.isLive = false;
+          });
+          
+          // Add new messages to beginning
+          allMessages = [...newMessages, ...allMessages].sort((a, b) => {
+            const timeA = new Date(a.timestamp || a.createdAt || a.time || Date.now()).getTime();
+            const timeB = new Date(b.timestamp || b.createdAt || b.time || Date.now()).getTime();
+            return timeB - timeA;
+          });
+          
+          // Keep only last 1000 messages to prevent memory issues
+          if (allMessages.length > 1000) {
+            allMessages = allMessages.slice(0, 1000);
+          }
+          
+          // Save to localStorage
+          saveMessagesToStorage();
+          
+          // Update filtered messages if needed
+          const currentSearch = document.getElementById("search").value.toLowerCase();
+          const currentFilter = document.getElementById("filter").value;
+          
+          if (currentSearch || currentFilter !== "all") {
+            // Re-apply filters with new data
+            applyFilters();
+          } else {
+            // Just update displayed messages with new data
+            displayedMessages = allMessages.slice();
+            renderCurrentPage();
+          }
+          
+          // Update total count
+          updateTotalCount();
+          
+          // Show subtle notification
+          showToast(`+${newMessages.length} new messages`);
+        }
+      }
     }
+  } catch (e) {
+    console.error('Silent fetch error:', e);
   }
-});
+}
 
-window.addEventListener('beforeunload', function() {
-  // Save current state before leaving the page (unless going to device details)
-  if (!isNavigatingToDeviceDetails()) {
-    saveCurrentState();
-  }
-});
+/* ===== CLEAR FILTERS ===== */
+function clearFilters() {
+  document.getElementById("search").value = "";
+  document.getElementById("filter").value = "all";
+  applyFilters();
+  showToast("Filters cleared!");
+}
 
-// Clear saved state on complete refresh
-window.addEventListener('pageshow', function(event) {
-  if (event.persisted) {
-    // Page was restored from bfcache
-    console.log('🔄 Page restored from bfcache');
-  } else if (isCompleteRefresh()) {
-    // Complete refresh - clear state
-    clearState();
-  }
-});
+/* ===== REFRESH MESSAGES ===== */
+function refreshMessages() {
+  console.log('🔄 Manual refresh triggered');
+  fetchAllMessages(true);
+  showToast("Messages refreshed!");
+}
 
-/* ===== INITIALIZATION ===== */
-document.addEventListener('DOMContentLoaded', function() {
-  // Setup navigation first
-  setupNavigation();
-  
-  // Check authentication immediately
-  if (!checkAuth()) {
-    return;
-  }
-  
-  // Add event listeners
+/* ===== EVENT LISTENERS SETUP ===== */
+function setupEventListeners() {
   const searchInput = document.getElementById("search");
   const filterSelect = document.getElementById("filter");
   const loadMoreBtn = document.getElementById("loadMoreBtn");
   
   if (searchInput) {
-    searchInput.addEventListener("input", function() {
-      // Debounce the search
-      clearTimeout(window.searchTimeout);
-      window.searchTimeout = setTimeout(() => {
-        applyFilters();
-      }, 300);
-    });
+    searchInput.addEventListener("input", debounce(applyFilters, 300));
   }
   
   if (filterSelect) {
@@ -2454,34 +2662,159 @@ document.addEventListener('DOMContentLoaded', function() {
   if (loadMoreBtn) {
     loadMoreBtn.addEventListener("click", loadMoreMessages);
   }
+}
+
+/* ===== PAGE VISIBILITY HANDLING ===== */
+document.addEventListener('visibilitychange', function() {
+  if (document.visibilityState === 'visible') {
+    console.log('👀 Page became visible - checking if we need to refresh');
+    
+    // If we just navigated back from device details, restore state
+    const urlParams = new URLSearchParams(window.location.search);
+    const fromDeviceDetails = urlParams.get('fromDeviceDetails');
+    
+    if (fromDeviceDetails) {
+      console.log('🔙 Returning from device details');
+      
+      // Clean the URL
+      window.history.replaceState({}, document.title, window.location.pathname);
+      
+      // Load saved state
+      const savedState = loadSavedState();
+      if (savedState) {
+        console.log('🔄 Restoring state on return from device details');
+        restoreSavedState(savedState);
+        
+        // Apply filters to update UI
+        applyFilters();
+        
+        // Update total count
+        updateTotalCount();
+        
+        // Show toast
+        showToast(`Restored ${allMessages.length} messages`);
+      }
+    }
+    
+    // Refresh if it's been more than 5 minutes
+    const lastState = loadSavedState();
+    if (lastState && lastState.saveTime && (Date.now() - lastState.saveTime > 5 * 60 * 1000)) {
+      console.log('🔄 Refreshing data after 5+ minutes of inactivity');
+      fetchFreshDataSilently();
+    }
+  }
   
-  fetchAllMessages();
-  
-  initSocket();
-  
-  setInterval(saveCurrentState, 5000);
+  if (document.visibilityState === 'hidden') {
+    // Save state when page is hidden
+    saveCurrentState();
+  }
 });
 
-function refreshMessages() {
-  const loader = document.getElementById("fullscreenLoader");
-  if (loader) {
-    loader.style.display = "flex";
-    loader.classList.remove("hidden");
+// Handle beforeunload - save state unless going to device details
+window.addEventListener('beforeunload', function() {
+  // Only save state if we're not navigating to device details
+  if (!isNavigatingToDeviceDetails) {
+    saveCurrentState();
+  }
+});
+
+// Handle popstate (back/forward navigation)
+window.addEventListener('popstate', function(event) {
+  console.log('🔙 Back/forward navigation detected');
+  
+  // Restore saved state
+  const savedState = loadSavedState();
+  if (savedState) {
+    console.log('🔄 Restoring state from popstate event');
+    restoreSavedState(savedState);
+    applyFilters();
+  }
+});
+
+// Prevent default form submission
+document.addEventListener('submit', function(e) {
+  if (e.target.tagName === 'FORM') {
+    e.preventDefault();
+  }
+});
+
+/* ===== INITIALIZATION ===== */
+document.addEventListener('DOMContentLoaded', async function() {
+  console.log('🚀 DOM Content Loaded - Initializing messages page');
+  
+  // Setup navigation first
+  setupNavigation();
+  
+  // Check authentication immediately
+  if (!checkAuth()) {
+    return;
   }
   
-  fetchAllMessages();
-  showToast("Messages refreshed!");
-}
-
-function checkSocketStatus() {
-  if (socket && socket.connected) {
-    console.log('Socket is connected');
-    showToast("Socket connected ✓");
-  } else {
-    console.log('Socket is not connected');
-    showToast("Socket not connected ✗");
+  // Check if we're coming back from device details
+  const urlParams = new URLSearchParams(window.location.search);
+  const fromDeviceDetails = urlParams.get('fromDeviceDetails');
+  const deviceId = urlParams.get('deviceId');
+  
+  // Clean URL parameters if coming from device details
+  if (fromDeviceDetails || deviceId) {
+    window.history.replaceState({}, document.title, window.location.pathname);
   }
-}
+  
+  // Load saved state FIRST
+  const savedState = loadSavedState();
+  
+  // If we have saved state and it's recent, restore it IMMEDIATELY
+  if (savedState && savedState.allMessages && savedState.allMessages.length > 0) {
+    console.log('🔄 RESTORING FULL STATE FROM CACHE');
+    
+    // Restore all data from saved state
+    restoreSavedState(savedState);
+    
+    // Update UI immediately
+    updateTotalCount();
+    renderCurrentPage();
+    
+    // Hide loader quickly
+    setTimeout(hideLoader, 300);
+    
+    // Show user we're using cached data
+    showToast(`Using cached data (${allMessages.length} messages)`);
+    
+    // Fetch fresh data in background WITHOUT disturbing UI
+    setTimeout(fetchFreshDataSilently, 1000);
+    
+  } else {
+    // No saved state, fetch fresh data
+    console.log('🔄 No saved state found, fetching fresh data');
+    await fetchAllMessages();
+  }
+  
+  // Setup event listeners
+  setupEventListeners();
+  
+  // Initialize socket
+  initSocket();
+  
+  // Auto-save state every 30 seconds
+  setInterval(saveCurrentState, 30000);
+});
+
+/* ===== GLOBAL FUNCTIONS FOR DEBUGGING ===== */
+window.refreshMessages = refreshMessages;
+window.saveCurrentState = saveCurrentState;
+window.clearFilters = clearFilters;
+window.clearMessageCache = function() {
+  if (confirm('Clear all cached messages?')) {
+    localStorage.removeItem('messagesPageState');
+    localStorage.removeItem('cachedMessages');
+    allMessages = [];
+    displayedMessages = [];
+    processedIds.clear();
+    renderCurrentPage();
+    showToast('Cache cleared!');
+    setTimeout(() => window.location.reload(), 1000);
+  }
+};
 </script>
 </body>
 </html>
