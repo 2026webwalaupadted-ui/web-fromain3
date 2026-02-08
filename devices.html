@@ -3971,10 +3971,9 @@ document.addEventListener('DOMContentLoaded', async function() {
     localStorage.removeItem('deviceListFilter');
     currentPage = 1;
     currentFilter = 'all';
-    console.log("🔄 Fresh page load, resetting state");
+    console.log(" Fresh page load, resetting state");
   }
   
-  // Fetch initial devices
   setTimeout(() => {
     fetchDevices(false);
   }, 1000);
